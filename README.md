@@ -1,7 +1,3 @@
-<<<<<<< HEAD
-# ai_text_search
-AI assistant for text search project
-=======
 # GSOM YaGPT bot for an AI search
 Experimental AI bot based on [Yandex repository for Retrieval-Augmented Generation](https://github.com/yandex-cloud-examples/yc-yandexgpt-qa-bot-for-docs) with help of Yandex.Cloud services.
 
@@ -28,4 +24,3 @@ Start service for AI search assistant with `docker compose` to run all applicati
 ```bash
 docker compose up
 ```
->>>>>>> 209202d (ititial commit)

@@ -1,0 +1,26 @@
+version: '0'
+services:
+  server_rag:
+    build: dockerfileforestbook/
+    command: python server/aisearch.py
+    ports:
+      - 40000:40000
+    volumes:
+      - /home/esguser/aibot:/home/jovyan/
+    healthcheck:
+      test: curl --fail -s http://localhost:40000/creds || exit 1
+      interval: 1m
+      timeout: 1m
+  client_rag:
+    build: dockerfileforestbook/
+    command: streamlit run app/Main_page.py --server.port 30000 --browser.gatherUsageStats False
+    ports:
+      - 30000:30000
+    depends_on:
+      - server_rag
+    volumes:
+      - /home/esguser/aibot:/home/jovyan/
+    healthcheck:
+      test: curl --fail -s http://localhost:30000 || exit 1
+      interval: 1m
+      timeout: 1m
