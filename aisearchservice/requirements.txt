@@ -1,0 +1,13 @@
+PyJWT
+streamlit
+fastapi[standard]
+uvicorn
+langchain-community
+opensearch-py
+pdf2image
+sentence_transformers
+accelerate
+unstructured
+unstructured[all-docs]
+chromadb
+yandex-cloud-ml-sdk

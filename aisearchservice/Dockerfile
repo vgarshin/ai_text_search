@@ -1,4 +1,4 @@
-FROM cr.yandex/crptfs8246iv37ojkorv/mibadsai:20240925v0
+FROM cr.yandex/crptfs8246iv37ojkorv/simbadsai:20250404v0
 
 USER root
 
