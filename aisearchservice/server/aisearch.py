@@ -34,14 +34,15 @@ from langchain_community.llms import YandexGPT
 from langchain_community.embeddings.yandex import YandexGPTEmbeddings
 
 from bookbuilder import booktools
-from .auth import authorization_middleware
-from .config import SETTINGS
-from .logger import book_logger_qh
+from auth import authorization_middleware
+from config import SETTINGS
+from logger import book_logger_qh
 
 
 class BookSearcher():
-    def __init__(self, settings):
+    def __init__(self, settings, logger):
         self.settings = settings
+        self.logger = logger
         self.embeddings = YandexGPTEmbeddings(
             folder_id=self.settings.folder_id,
             api_key=self.settings.secret_key,
@@ -54,14 +55,14 @@ class BookSearcher():
         s3 = session.client(
             service_name='s3',
             aws_access_key_id=self.settings.aws_access_key_id,
-            aws_secret_access_key=self.setting.aws_secret_access_key,
-            endpoint_url=self.setting.endpoint_url
+            aws_secret_access_key=self.settings.aws_secret_access_key,
+            endpoint_url=self.settings.endpoint_url
         )
         all_files = [
             key['Key'] for key
             in s3.list_objects(
-                Bucket=self.setting.bucket, 
-                Prefix=self.setting.bucket_prefix
+                Bucket=self.settings.bucket, 
+                Prefix=self.settings.bucket_prefix
             )['Contents']
         ]
         rag_files = [x for x in all_files if '.ipynb_checkpoints' not in x]
@@ -74,11 +75,11 @@ class BookSearcher():
             try:
                 # load file from storage
                 doc = S3FileLoader(
-                    self.setting.bucket,
+                    self.settings.bucket,
                     file_path,
                     aws_access_key_id=self.settings.aws_access_key_id,
-                    aws_secret_access_key=self.setting.aws_secret_access_key,
-                    endpoint_url=self.setting.endpoint_url
+                    aws_secret_access_key=self.settings.aws_secret_access_key,
+                    endpoint_url=self.settings.endpoint_url
                 ).load()
         
                 # metadata extract
@@ -89,25 +90,27 @@ class BookSearcher():
                     Представь результат в виде JSON с полями title, authors, org, period. 
                     Если названий, авторов и периодов несколько, то укажи их через 
                     запятую как одну строку. Пустые значения заполни пустой строкой."""
-                    res = from_jsons.ask_llm(
-                        model_name=self.setting.model_name,
+                    res = booktools.ask_llm(
+                        model_name=self.settings.model_name,
                         prompt=prompt,
                         instruction_text=instruction_text,
-                        folder_id=self.setting.folder_id,
-                        api_key=self.setting.secret_key,
-                        temperature=self.setting.temperature,
-                        max_tokens=self.setting.max_tokens
+                        folder_id=self.settings.folder_id,
+                        api_key=self.settings.secret_key,
+                        temperature=self.settings.temperature,
+                        max_tokens=self.settings.max_tokens
                     )
                     res = eval(res.replace('`', ''))
-                    print(res)
+                    msg = f'Metadata extract - {res}'
+                    self.logger.info(msg)
                     if not isinstance(res, list):
                         d.metadata.update(res)
                 
                 # collection of docs
                 docs.extend(doc)
             except Exception as e:
-                print(f'Error file -{file_path}- processing:', e)
-            return docs
+                msg = f'Error file -{file_path}- processing: {e}'
+                self.logger.error(msg)
+        return docs
 
     def docs_splitted(self, docs):
         text_splitter = RecursiveCharacterTextSplitter(
@@ -118,63 +121,77 @@ class BookSearcher():
                 '.',
                 ','
             ],
-            chunk_size=self.setting.chunk_size, 
-            chunk_overlap=self.setting.chunk_overlap
+            chunk_size=self.settings.chunk_size, 
+            chunk_overlap=self.settings.chunk_overlap
         )
         docs_splitted = text_splitter.split_documents(docs)
         return docs_splitted
 
     def db_connect(self):
         client = OpenSearch(
-          self.setting.db_hosts,
-          http_auth=(self.setting.db_user, self.setting.db_password),
+          self.settings.db_hosts,
+          http_auth=(self.settings.db_user, self.settings.db_password),
           use_ssl=True,
           verify_certs=True,
-          ca_certs=self.setting.ca
+          ca_certs=self.settings.ca
         )
         indices_exist = client.indices.stats()['indices'].keys()
-        print(client.info())
-        print('indices exist:', indices_exist)
-        if self.setting.new_index:
-            if self.setting.os_index in client.indices.stats()['indices'].keys():
-                client.indices.delete(index=self.setting.os_index)
+        msg = f'Database connection - {client.info()}'
+        self.logger.info(msg)
+        msg = f'Indices exist: {indices_exist}'
+        self.logger.info(msg)
+        if self.settings.new_index:
+            if self.settings.os_index in client.indices.stats()['indices'].keys():
+                client.indices.delete(index=self.settings.os_index)
             else:
-                print(f'Index {self.setting.os_index} does not exist')
+                msg = f'Index {self.settings.os_index} does not exist'
+                self.logger.info(msg)
         else:
             indices_stats = {}
-            for k, v in client.indices.stats(index=self.setting.os_index)['indices'].items():
+            for k, v in client.indices.stats(index=self.settings.os_index)['indices'].items():
                 indices_stats[k] = v['primaries']['docs']
-                print(k, v['primaries']['docs'])
+                msg = f'Index info {k}, {v["primaries"]["docs"]}'
+                self.logger.info(msg)
         return client, indices_exist, indices_stats
 
     def db_vectorstore(self):
-        rag_files = self.rag_files()
-        docs = self.docs_from_files(rag_files)
-        docs_splitted = self.docs_splitted(self, docs)
-        if self.setting.new_index:
+        if self.settings.new_index:
+            rag_files = self.rag_files()
+            msg = f'Creating new index info {self.settings.os_index}, from {len(rag_files)} files'
+            self.logger.info(msg)
+            docs = self.docs_from_files(rag_files)
+            msg = f'Documents processed to load: {len(docs)}'
+            self.logger.info(msg)
+            docs_splitted = self.docs_splitted(docs)
+            msg = f'Total chunks to load: {len(docs_splitted)}'
+            self.logger.info(msg)
             vectorstore = OpenSearchVectorSearch.from_documents(
                 docs_splitted,
                 self.embeddings,
-                index_name=self.setting.os_index,
-                opensearch_url=self.setting.db_hosts,
-                http_auth=(self.setting.db_user, self.setting.db_password),
+                index_name=self.settings.os_index,
+                opensearch_url=self.settings.db_hosts,
+                http_auth=(self.settings.db_user, self.settings.db_password),
                 use_ssl=True,
                 verify_certs=True,
-                ca_certs=self.setting.ca,
+                ca_certs=self.settings.ca,
                 engine='lucene',
-                bulk_size=self.setting.bulk_size
+                bulk_size=self.settings.bulk_size
             )
+            msg = f'Vectorstore loaded with documents'
+            self.logger.info(msg)
         else:
             vectorstore = OpenSearchVectorSearch(
-                embedding_function=embeddings,
-                index_name=OS_INDEX, 
-                opensearch_url=self.setting.db_hosts,
-                http_auth=(self.setting.db_user, self.setting.db_password),
+                embedding_function=self.embeddings,
+                index_name=self.settings.os_index, 
+                opensearch_url=self.settings.db_hosts,
+                http_auth=(self.settings.db_user, self.settings.db_password),
                 use_ssl=True,
                 verify_certs=True,
-                ca_certs=self.setting.ca,
+                ca_certs=self.settings.ca,
                 engine='lucene'
             )
+            msg = f'Vectorstore initialized, pre-loaded index {self.settings.os_index}'
+            self.logger.info(msg)
         return vectorstore
 
     def db_simularity_search(self, query, k_max):
@@ -209,7 +226,7 @@ class BookSearcher():
             ('human', '{input}'),
         ])
         history_aware_retriever = create_history_aware_retriever(
-            llm, retriever, contextualize_q_prompt
+            self.llm, retriever, contextualize_q_prompt
         )
         
         qa_system_prompt = ("""
@@ -235,19 +252,20 @@ class BookSearcher():
         return rag_chain
 
 
-LOGGER = book_logger_qh(
+LOGGER, QL = book_logger_qh(
     settings=SETTINGS, 
     file_name='server.log', 
     name=__name__
 )
+QL.start()
 msg = 'Search server started, logger initialized'
 LOGGER.info(msg)
-BOOK_SEARCHER = BookSearcher(settings)
+BOOK_SEARCHER = BookSearcher(SETTINGS, LOGGER)
 msg = 'BookSearcher instance created, documents uploaded to database'
 LOGGER.info(msg)
 
 app = FastAPI()
-if not settings.no_auth:
+if not SETTINGS.no_auth:
     app.add_middleware(
         BaseHTTPMiddleware, 
         dispatch=authorization_middleware
@@ -271,30 +289,30 @@ class AskParams(BaseModel):
 @app.get('/datainfo')
 async def data_config():
     data = {
-        'bucket': SETTINGS['bucket'], 
-        'bucket_info': creds['bucket_info'],
-        'bucket_prefix': SETTINGS['bucket_prefix'],
-        'endpoint_url': SETTINGS['endpoint_url']
+        'bucket': SETTINGS.bucket, 
+        'bucket_info': SETTINGS.bucket_info,
+        'bucket_prefix': SETTINGS.bucket_prefix,
+        'endpoint_url': SETTINGS.endpoint_url
     }
     return data
 
 
 @app.get('/creds')
 async def server_config():
-    return {'data' : list(SETTINGS.keys())}
+    return {'data': list(SETTINGS.model_fields_set)}
 
 
 @app.get('/logs')
 async def server_logs():
-    with open(f'{SETTINGS["logs_path"]}/server.log') as file:
+    with open(f'{SETTINGS.logs_path}/server.log') as file:
         logs = file.readlines()
-    return {'data' : logs}
+    return {'data': logs}
 
 
 @app.post('/init')
 async def init_chain(initparams: InitParams = Body(...)):
-    k_max = initparams['k_max']
-    temperature = initparams['temperature']
+    k_max = initparams.k_max
+    temperature = initparams.temperature
     global RAG_CHAIN
     RAG_CHAIN = BOOK_SEARCHER.rag_chain(k_max, temperature)
     msg = 'RAG chain for k-max={} done, temperature={}'.format(
@@ -302,38 +320,38 @@ async def init_chain(initparams: InitParams = Body(...)):
         str(temperature)
     )
     LOGGER.info(msg)
-    return {'result' : msg}
+    return {'result': msg}
 
 
 @app.post('/search')
 async def search_db(searchparams: SearchParams = Body(...)):
-    k_max = initparams['k_max']
-    query = searchparams['query']
-    docs = BOTCHAIN.db_simularity_search(query=query, k=k)
+    k_max = searchparams.k_max
+    query = searchparams.query
+    docs = BOOK_SEARCHER.db_simularity_search(query=query, k_max=k_max)
     msg = 'Search for query -{}- done, k_max={}'.format(
         query,
-        k
+        k_max
     )
     LOGGER.info(msg)
-    return {'result' : msg, 'data': docs}
+    return {'result': msg, 'data': docs}
 
     
 @app.post('/ask')
 async def ask_chain(askparams: AskParams = Body(...)):
-    query = askparams['query']
+    query = askparams.query
     chat_history = []  # if needed
     response = RAG_CHAIN.invoke({
         'input': query, 
         'chat_history': chat_history
     })
-    msg = 'Q - {} symbols | A - {} symbols, {} context documents'.format(
-        len(query),
+    msg = 'Q - {} | A - {} symbols, {} context documents'.format(
+        query,
         len(response['answer']),
         len(response['context'])
     )
     LOGGER.info(msg)
-    return {'result': msg, 'answer' : response}
+    return {'result': msg, 'answer': response}
 
 
 if __name__ == '__main__':
-    uvicorn.run(app, host='0.0.0.0', port=SETTINGS.server_port, debug=True)
+    uvicorn.run(app, host='0.0.0.0', port=SETTINGS.server_port)

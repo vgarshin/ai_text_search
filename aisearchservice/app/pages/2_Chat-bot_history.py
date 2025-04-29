@@ -13,8 +13,8 @@ def read_json(file_path):
     return access_data
 
 
-APP_CONFIG = read_json(file_path='configs/config.json')
-PORT = APP_CONFIG['port']
+APP_CONFIG = read_json(file_path='aisearchservice/config.json')
+PORT = APP_CONFIG['server_port']
 IP = APP_CONFIG['ip']
 URL_SERVER = 'http://{}:{}'.format(IP, PORT)
 HEADER = {'Content-type': 'application/json'}

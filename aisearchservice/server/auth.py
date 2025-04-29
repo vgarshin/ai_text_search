@@ -2,7 +2,7 @@ import jwt
 from fastapi import Request
 from fastapi.responses import JSONResponse
 
-from .config import SETTINGS
+from config import SETTINGS
 
 
 async def authorization_middleware(

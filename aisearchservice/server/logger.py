@@ -1,3 +1,4 @@
+import os
 import queue
 import logging
 from pathlib import Path
@@ -17,6 +18,7 @@ def book_logger_fh(settings, name):
 
 
 def book_logger_qh(settings, file_name, name):
+    os.makedirs(settings.logs_path, exist_ok=True)
     log_path = Path(settings.logs_path)
     log_file = log_path.joinpath(file_name)
     logger = logging.getLogger(name)
