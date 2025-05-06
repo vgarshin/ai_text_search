@@ -20,6 +20,7 @@ class Settings(BaseModel):
     ca: str
     bulk_size: int
     k_max: int
+    score_threshold: float
     model_name: str
     temperature: float
     max_tokens: int

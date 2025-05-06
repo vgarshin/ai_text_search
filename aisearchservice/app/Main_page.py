@@ -5,7 +5,7 @@ import streamlit as st
 
 st.set_page_config(
     page_title='AI assistant',
-    page_icon=':mag:',
+    page_icon=':bulb:',
 )
 
 st.header('AI-помощник по летописям природы заповедника "Кедровая Падь"', divider='rainbow')

@@ -1,6 +1,7 @@
 PyJWT
 streamlit
 fastapi[standard]
+python-multipart
 uvicorn
 langchain-community
 opensearch-py

@@ -3,20 +3,33 @@
 
 import os
 import sys
+import jwt
 import json
 import requests
 import pandas as pd
 import streamlit as st
 
-sys.path.append('../../')
+sys.path.append('/home/jovyan/aisearchservice')
 from server.config import SETTINGS
 
 URL_SERVER = 'http://{}:{}'.format(SETTINGS.ip, SETTINGS.server_port)
-HEADER = {'Content-type': 'application/json'}
+JWT_ALGORITHM = 'HS256'
+payload = {
+    'jwt_secret': SETTINGS.jwt_secret
+}
+token = jwt.encode(
+    payload, 
+    SETTINGS.jwt_secret, 
+    algorithm=JWT_ALGORITHM
+)
+HEADERS = {
+    'Content-type': 'application/json',
+    'Authorization': token
+}
 
 r = requests.get(
     URL_SERVER + '/datainfo',
-    headers=HEADER,
+    headers=HEADERS,
     verify=True
 )
 
@@ -41,15 +54,15 @@ st.markdown(f'Источник (бакет): {SETTINGS.bucket_info}')
 st.markdown(f'Источник (префикс): {SETTINGS.bucket_prefix}')
 st.markdown(f'ID бакета: {SETTINGS.bucket}')
 
-#st.write('#### Задайте инструкцию')
-#default_instructions = """Вы являетесь поисковым ассистентом.
-#Ваша задача состоит в поиске и систематизации сведений из 
-#летописей природы, составленных в ходе наблюдения за природным
-#заповедником 'Кедровая Падь'."""
-#instructions = st.text_area(
-#    'Введите инструкцию для чат-бота',
-#    default_instructions
-#)
+st.write('#### Задайте инструкцию')
+default_instruction = """Вы являетесь поисковым ассистентом.
+Ваша задача состоит в поиске и систематизации сведений из 
+летописей природы, составленных в ходе наблюдения за природным
+заповедником 'Кедровая Падь'."""
+instruction = st.text_area(
+    'Введите инструкцию для чат-бота',
+    default_instruction
+)
 
 st.write('#### Температура чат-бота')
 st.write(
@@ -70,17 +83,18 @@ st.write(
     Значение по умолчанию: 2 документа
     """
 )
-k_max = st.slider('Задайте количество документов', 1, 5, 2)
+k_max = st.slider('Задайте количество документов', 1, 5, 3)
 
-data = {'k_max': k_max, 'temperature': temperature}
+data = {'instruction': instruction, 'k_max': k_max, 'temperature': temperature}
 with st.spinner('Запуск чат-бота...'):
     r = requests.post(
         URL_SERVER + '/init',
         data=json.dumps(data),
-        headers=HEADER,
+        headers=HEADERS,
         verify=True
     )
 if r.status_code == 200:
+    st.write('#### Задавайте вопросы чат-боту')
     if 'messages' not in st.session_state:
         st.session_state.messages = []
     for message in st.session_state.messages:
@@ -98,17 +112,18 @@ if r.status_code == 200:
         r = requests.post(
             URL_SERVER + '/ask',
             data=json.dumps(data),
-            headers=HEADER,
+            headers=HEADERS,
             verify=True
         )
-        sources = '\n\nИсточники:'
+        sources = ''
         for c in r.json()['answer']['context']:
             sources += ('\n - ' + ', '.join([
                 'Наименование: ' + c['metadata']['title'], 
                 'Период: ' + c['metadata']['period'], 
                 'Файл: ' + c['metadata']['source'].split('/')[-1]
             ]))
-        answer = r.json()['answer']['answer'] + sources
+        sources_info = ('\n\nИсточники:' + sources) if sources else ''
+        answer = r.json()['answer']['answer'] + sources_info
         with st.chat_message('assistant'):
             st.markdown(answer)
         st.session_state.messages.append(
@@ -120,5 +135,5 @@ if r.status_code == 200:
 else:
     st.error(
         'Ошибка запуска ассистента, попробуйте поменять параметры', 
-        icon=':warning:'
+        icon='⚠️'
     )

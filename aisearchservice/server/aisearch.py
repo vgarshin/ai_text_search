@@ -9,7 +9,9 @@ import boto3
 import requests
 import datetime
 import uvicorn
-from fastapi import FastAPI, Body, HTTPException
+from io import BytesIO
+from fastapi import FastAPI, Body, HTTPException, File, UploadFile
+from contextlib import asynccontextmanager
 from pydantic import BaseModel
 from starlette.middleware.base import BaseHTTPMiddleware
 import langchain
@@ -40,8 +42,17 @@ from logger import book_logger_qh
 
 
 class BookSearcher():
-    def __init__(self, settings, logger):
+    def __init__(self, settings, logger, rebuild=False, rebuild_index=''):
         self.settings = settings
+        self.rebuild = rebuild
+        self.rebuild_index = rebuild_index
+        self.session = boto3.session.Session()
+        self.s3 = self.session.client(
+            service_name='s3',
+            aws_access_key_id=self.settings.aws_access_key_id,
+            aws_secret_access_key=self.settings.aws_secret_access_key,
+            endpoint_url=self.settings.endpoint_url
+        )
         self.logger = logger
         self.embeddings = YandexGPTEmbeddings(
             folder_id=self.settings.folder_id,
@@ -51,16 +62,9 @@ class BookSearcher():
         self.vectorstore = self.db_vectorstore()
 
     def rag_files(self):
-        session = boto3.session.Session()
-        s3 = session.client(
-            service_name='s3',
-            aws_access_key_id=self.settings.aws_access_key_id,
-            aws_secret_access_key=self.settings.aws_secret_access_key,
-            endpoint_url=self.settings.endpoint_url
-        )
         all_files = [
             key['Key'] for key
-            in s3.list_objects(
+            in self.s3.list_objects(
                 Bucket=self.settings.bucket, 
                 Prefix=self.settings.bucket_prefix
             )['Contents']
@@ -68,7 +72,7 @@ class BookSearcher():
         rag_files = [x for x in all_files if '.ipynb_checkpoints' not in x]
         rag_files = [x for x in rag_files if x[-1] != '/']
         return rag_files
-
+    
     def docs_from_files(self, rag_files):
         docs = []
         for file_path in rag_files:
@@ -108,7 +112,7 @@ class BookSearcher():
                 # collection of docs
                 docs.extend(doc)
             except Exception as e:
-                msg = f'Error file -{file_path}- processing: {e}'
+                msg = f'Error file `{file_path}` processing: {e}'
                 self.logger.error(msg)
         return docs
 
@@ -135,36 +139,32 @@ class BookSearcher():
           verify_certs=True,
           ca_certs=self.settings.ca
         )
-        indices_exist = client.indices.stats()['indices'].keys()
-        msg = f'Database connection - {client.info()}'
-        self.logger.info(msg)
-        msg = f'Indices exist: {indices_exist}'
-        self.logger.info(msg)
-        if self.settings.new_index:
-            if self.settings.os_index in client.indices.stats()['indices'].keys():
-                client.indices.delete(index=self.settings.os_index)
-            else:
-                msg = f'Index {self.settings.os_index} does not exist'
-                self.logger.info(msg)
-        else:
-            indices_stats = {}
-            for k, v in client.indices.stats(index=self.settings.os_index)['indices'].items():
+        indices_exist = list(client.indices.stats()['indices'].keys())
+        indices_stats = {}
+        for idx in indices_exist:
+            for k, v in client.indices.stats(index=idx)['indices'].items():
                 indices_stats[k] = v['primaries']['docs']
-                msg = f'Index info {k}, {v["primaries"]["docs"]}'
-                self.logger.info(msg)
         return client, indices_exist, indices_stats
 
     def db_vectorstore(self):
-        if self.settings.new_index:
+        if self.settings.new_index or self.rebuild:
             rag_files = self.rag_files()
-            msg = f'Creating new index info {self.settings.os_index}, from {len(rag_files)} files'
+            if self.rebuild_index:
+                self.settings.os_index = self.rebuild_index
+            client, indices_exist, indices_stats = self.db_connect()
+            if self.settings.os_index in indices_exist:
+                client.indices.delete(index=self.settings.os_index)
+            msg = f'Creating new index info `{self.settings.os_index}`, from {len(rag_files)} files'
             self.logger.info(msg)
+
             docs = self.docs_from_files(rag_files)
             msg = f'Documents processed to load: {len(docs)}'
             self.logger.info(msg)
+
             docs_splitted = self.docs_splitted(docs)
             msg = f'Total chunks to load: {len(docs_splitted)}'
             self.logger.info(msg)
+
             vectorstore = OpenSearchVectorSearch.from_documents(
                 docs_splitted,
                 self.embeddings,
@@ -177,7 +177,7 @@ class BookSearcher():
                 engine='lucene',
                 bulk_size=self.settings.bulk_size
             )
-            msg = f'Vectorstore loaded with documents'
+            msg = f'Vectorstore loaded with documents for index `{self.settings.os_index}`'
             self.logger.info(msg)
         else:
             vectorstore = OpenSearchVectorSearch(
@@ -190,7 +190,7 @@ class BookSearcher():
                 ca_certs=self.settings.ca,
                 engine='lucene'
             )
-            msg = f'Vectorstore initialized, pre-loaded index {self.settings.os_index}'
+            msg = f'Vectorstore initialized, pre-loaded index `{self.settings.os_index}`'
             self.logger.info(msg)
         return vectorstore
 
@@ -201,7 +201,7 @@ class BookSearcher():
         )
         return query_docs
 
-    def rag_chain(self, k_max, temperature):
+    def rag_chain(self, instruction, k_max, temperature):
         self.llm = YandexGPT(
             model_name=self.settings.model_name,
             api_key=self.settings.secret_key,
@@ -210,7 +210,10 @@ class BookSearcher():
         )
         retriever = self.vectorstore.as_retriever(
             search_type='similarity', 
-            search_kwargs={'k': k_max}
+            search_kwargs={
+                'k': k_max, 
+                'score_threshold': self.settings.score_threshold
+            }
         )
         contextualize_q_system_prompt = ("""
         Учитывая историю чата и последний вопрос пользователя,
@@ -228,18 +231,22 @@ class BookSearcher():
         history_aware_retriever = create_history_aware_retriever(
             self.llm, retriever, contextualize_q_prompt
         )
-        
-        qa_system_prompt = ("""
-        Ты являешься поисковым ассистентом и должен искать информацию 
-        в приложенных документах. Если информация не найдена, то отвечай,
-        что информация в документах не содержится. Отвечай на вопрос, 
-        используя информацию из текста ниже.
-        
+        if not instruction:
+            instruction = """
+            Ты являешься поисковым ассистентом и должен искать информацию 
+            в приложенных документах. Если информация не найдена, то отвечай,
+            что информация в документах не содержится. Отвечай на вопрос, 
+            используя информацию из текста ниже.
+            """
+        context_prompt = """
+
         Текст:
         -----
         {context}
         -----
-        """)
+        """
+        instruction = context_prompt + instruction
+        qa_system_prompt = (instruction)
         qa_prompt = ChatPromptTemplate.from_messages([
             ('system', qa_system_prompt),
             MessagesPlaceholder('chat_history'),
@@ -260,11 +267,30 @@ LOGGER, QL = book_logger_qh(
 QL.start()
 msg = 'Search server started, logger initialized'
 LOGGER.info(msg)
-BOOK_SEARCHER = BookSearcher(SETTINGS, LOGGER)
-msg = 'BookSearcher instance created, documents uploaded to database'
-LOGGER.info(msg)
 
-app = FastAPI()
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    app.state.BOOK_SEARCHER = BookSearcher(SETTINGS, LOGGER)
+    msg = 'BookSearcher instance created, documents uploaded to database'
+    LOGGER.info(msg)
+    app.state.RAG_CHAIN = app.state.BOOK_SEARCHER.rag_chain(
+        instruction='',
+        k_max=SETTINGS.k_max, 
+        temperature=SETTINGS.temperature
+    )
+    msg = 'RAG chain started with default k-max={} done, temperature={}'.format(
+        str(SETTINGS.k_max),
+        str(SETTINGS.temperature)
+    )
+    LOGGER.info(msg)
+    yield
+    app.state.BOOK_SEARCHER = None
+    app.state.RAG_CHAIN = None
+
+
+app = FastAPI(lifespan=lifespan)
+
 if not SETTINGS.no_auth:
     app.add_middleware(
         BaseHTTPMiddleware, 
@@ -273,6 +299,7 @@ if not SETTINGS.no_auth:
 
 
 class InitParams(BaseModel):
+    instruction: str
     k_max: int
     temperature: float
 
@@ -284,6 +311,10 @@ class SearchParams(BaseModel):
 
 class AskParams(BaseModel):
     query: str
+
+
+class ReBuildParams(BaseModel):
+    rebuild_index: str
 
 
 @app.get('/datainfo')
@@ -309,13 +340,19 @@ async def server_logs():
     return {'data': logs}
 
 
+@app.get('/sources')
+async def source_files():
+    rag_files = app.state.BOOK_SEARCHER.rag_files()
+    return {'data': rag_files}
+
+
 @app.post('/init')
 async def init_chain(initparams: InitParams = Body(...)):
+    instruction = initparams.instruction
     k_max = initparams.k_max
     temperature = initparams.temperature
-    global RAG_CHAIN
-    RAG_CHAIN = BOOK_SEARCHER.rag_chain(k_max, temperature)
-    msg = 'RAG chain for k-max={} done, temperature={}'.format(
+    app.state.RAG_CHAIN = app.state.BOOK_SEARCHER.rag_chain(instruction, k_max, temperature)
+    msg = 'RAG chain initialized for k-max={} done, temperature={}'.format(
         str(k_max),
         str(temperature)
     )
@@ -327,8 +364,8 @@ async def init_chain(initparams: InitParams = Body(...)):
 async def search_db(searchparams: SearchParams = Body(...)):
     k_max = searchparams.k_max
     query = searchparams.query
-    docs = BOOK_SEARCHER.db_simularity_search(query=query, k_max=k_max)
-    msg = 'Search for query -{}- done, k_max={}'.format(
+    docs = app.state.BOOK_SEARCHER.db_simularity_search(query=query, k_max=k_max)
+    msg = 'Search for query `{}` done, k_max={}'.format(
         query,
         k_max
     )
@@ -340,7 +377,7 @@ async def search_db(searchparams: SearchParams = Body(...)):
 async def ask_chain(askparams: AskParams = Body(...)):
     query = askparams.query
     chat_history = []  # if needed
-    response = RAG_CHAIN.invoke({
+    response = app.state.RAG_CHAIN.invoke({
         'input': query, 
         'chat_history': chat_history
     })
@@ -351,6 +388,44 @@ async def ask_chain(askparams: AskParams = Body(...)):
     )
     LOGGER.info(msg)
     return {'result': msg, 'answer': response}
+
+
+@app.post('/upload/{folder}')
+async def upload_file(folder: str, file: UploadFile = File(...)):
+    file_key = SETTINGS.bucket_prefix + '/' + folder + '/' + file.filename
+    with BytesIO(await file.read()) as data:
+        app.state.BOOK_SEARCHER.s3.upload_fileobj(
+            data, 
+            SETTINGS.bucket, 
+            file_key
+        )
+    msg = 'file saved {}'.format(
+        file_key
+    )
+    LOGGER.info(msg)
+    return {'result': msg}
+
+
+@app.post('/rebuild')
+async def rebuild_vectorstore(rebuildparams: ReBuildParams = Body(...)):
+    rebuild_index = rebuildparams.rebuild_index
+    msg = f'Vectorstore rebuild started for index `{rebuild_index}`'
+    LOGGER.info(msg)
+    
+    app.state.BOOK_SEARCHER = BookSearcher(
+        SETTINGS, 
+        LOGGER, 
+        rebuild=True,
+        rebuild_index=rebuild_index
+    )
+    msg = f'Vectorstore rebuild finished for index `{rebuild_index}`'
+    LOGGER.info(msg)
+
+    client, indices_exist, indices_stats = app.state.BOOK_SEARCHER.db_connect()
+    msg = f'Index `{rebuild_index}` exists with {indices_stats[rebuild_index]} documents'
+    LOGGER.info(msg)
+
+    return {'result': msg}
 
 
 if __name__ == '__main__':
