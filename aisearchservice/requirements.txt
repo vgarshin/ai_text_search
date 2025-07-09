@@ -12,3 +12,6 @@ unstructured
 unstructured[all-docs]
 chromadb
 yandex-cloud-ml-sdk
+python-telegram-bot
+datasets
+ragas

@@ -6,6 +6,7 @@ import sys
 import jwt
 import json
 import requests
+import datetime
 import pandas as pd
 import streamlit as st
 
@@ -85,6 +86,9 @@ st.write(
 )
 k_max = st.slider('Задайте количество документов', 1, 5, 3)
 
+if 'chat_id' not in st.session_state:
+    st.session_state.chat_id = datetime.datetime.now().strftime('%Y%m%d%H%M%S%s')
+
 data = {'instruction': instruction, 'k_max': k_max, 'temperature': temperature}
 with st.spinner('Запуск чат-бота...'):
     r = requests.post(
@@ -108,7 +112,7 @@ if r.status_code == 200:
                 'content': query
             }
         )
-        data = {'query': query}
+        data = {'query': query, 'chat_id': st.session_state.chat_id}
         r = requests.post(
             URL_SERVER + '/ask',
             data=json.dumps(data),

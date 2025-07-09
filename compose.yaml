@@ -8,7 +8,7 @@ services:
     volumes:
       - /home/esguser/aibot:/home/jovyan/
     healthcheck:
-      test: curl --fail -s http://localhost:50000/creds || exit 1
+      test: ./aisearchservice/healthchecksrv.sh
       interval: 1m
       timeout: 1m
   client_rag:
@@ -21,6 +21,15 @@ services:
     volumes:
       - /home/esguser/aibot:/home/jovyan/
     healthcheck:
-      test: curl --fail -s http://localhost:50001 || exit 1
+      test: ./aisearchservice/healthcheckclnt.sh
       interval: 1m
       timeout: 1m
+  client_bot:
+    build: aisearchservice/
+    command: python aisearchservice/bot/tgbot.py
+    depends_on:
+      - server_rag
+    volumes:
+      - /home/esguser/aibot:/home/jovyan/
+    healthcheck:
+      disable: true

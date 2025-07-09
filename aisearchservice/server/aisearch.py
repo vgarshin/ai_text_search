@@ -34,6 +34,7 @@ from langchain.prompts.prompt import PromptTemplate
 from langchain.chains.qa_with_sources import load_qa_with_sources_chain
 from langchain_community.llms import YandexGPT
 from langchain_community.embeddings.yandex import YandexGPTEmbeddings
+from langchain_core.messages import HumanMessage, AIMessage
 
 from bookbuilder import booktools
 from auth import authorization_middleware
@@ -284,9 +285,13 @@ async def lifespan(app: FastAPI):
         str(SETTINGS.temperature)
     )
     LOGGER.info(msg)
+    app.state.CHAT_HISTORIES = {}
+    msg = 'Chat history initialized empty'
+    LOGGER.info(msg)
     yield
     app.state.BOOK_SEARCHER = None
     app.state.RAG_CHAIN = None
+    app.state.CHAT_HISTORIES = None
 
 
 app = FastAPI(lifespan=lifespan)
@@ -311,6 +316,7 @@ class SearchParams(BaseModel):
 
 class AskParams(BaseModel):
     query: str
+    chat_id: str
 
 
 class ReBuildParams(BaseModel):
@@ -346,6 +352,12 @@ async def source_files():
     return {'data': rag_files}
 
 
+@app.get('/chats')
+async def source_files():
+    chat_histories = app.state.CHAT_HISTORIES
+    return {'data': chat_histories}
+
+
 @app.post('/init')
 async def init_chain(initparams: InitParams = Body(...)):
     instruction = initparams.instruction
@@ -376,8 +388,11 @@ async def search_db(searchparams: SearchParams = Body(...)):
 @app.post('/ask')
 async def ask_chain(askparams: AskParams = Body(...)):
     query = askparams.query
-    chat_history = []  # if needed
-    response = app.state.RAG_CHAIN.invoke({
+    chat_id = askparams.chat_id
+    if chat_id not in app.state.CHAT_HISTORIES: 
+        app.state.CHAT_HISTORIES[chat_id] = []
+    chat_history = app.state.CHAT_HISTORIES[chat_id]
+    response = await app.state.RAG_CHAIN.ainvoke({
         'input': query, 
         'chat_history': chat_history
     })
@@ -387,6 +402,14 @@ async def ask_chain(askparams: AskParams = Body(...)):
         len(response['context'])
     )
     LOGGER.info(msg)
+    chat_history.extend([
+        HumanMessage(content=query),
+        AIMessage(content=response['answer'])
+    ])
+    # keep 10 last QA pairs only
+    # can keep all but keep in mind
+    # size of context window
+    app.state.CHAT_HISTORIES[chat_id] = chat_history[-10:]
     return {'result': msg, 'answer': response}
 
 

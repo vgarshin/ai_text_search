@@ -6,7 +6,7 @@ from pathlib import Path
 FORMATTER = logging.Formatter('%(asctime)s %(name)s %(levelname)s %(message)s')
 
 
-def book_logger_qh(settings, file_name, name):
+def bot_logger_qh(settings, file_name, name):
     os.makedirs(settings.logs_path, exist_ok=True)
     log_path = Path(settings.logs_path)
     log_file = log_path.joinpath(file_name)
